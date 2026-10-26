@@ -1,0 +1,27 @@
+<!doctype html><html><head><meta charset="utf-8"><title>Scout Pay</title>
+<script src="https://js.braintreegateway.com/web/dropin/1.43.0/js/dropin.min.js"></script>
+<style>body{font-family:system-ui;max-width:860px;margin:2rem auto;padding:0 1rem}section{border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}button{margin:.2rem}</style></head>
+<body><h1>Scout Pay</h1><p>AI relocation agent that plans your move and pays for it via PayPal / Braintree (sandbox).</p>
+<section><h2>1. Plan</h2><input id=o placeholder="From" value="Lahore"> <input id=d placeholder="To" value="Berlin">
+<input id=b type=number value=3000> <button onclick=plan()>Plan move</button><div id=plan></div></section>
+<section><h2>2. Pay</h2><div id=dropin></div><input id=amt type=number step=0.01 placeholder="Amount"> <input id=desc placeholder="Description">
+<button onclick=pay()>Pay</button><pre id=payout></pre></section>
+<section><h2>3. Approvals (human-in-the-loop)</h2><div id=appr></div></section>
+<section><h2>4. Transactions</h2><div id=tx></div></section>
+<script>
+let dropin=null,gw='mock';
+const j=(u,o)=>fetch(u,o).then(r=>r.json());
+const post=(u,b)=>j(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+async function init(){const t=await j('/api/client-token');gw=t.gateway;
+ if(gw==='braintree'){dropin=await braintree.dropin.create({authorization:t.token,container:'#dropin',paypal:{flow:'vault'}});}
+ else document.getElementById('dropin').innerText='Mock gateway (no Braintree keys set): payments are simulated.';refresh();}
+async function plan(){const p=await post('/api/plan',{origin:o.value,destination:d.value,budget:+b.value});
+ document.getElementById('plan').innerHTML=`<p>${p.summary} <i>(${p.provider})</i></p>`+p.payments.map(x=>`<div>${x.payee}: $${x.amount} (${x.purpose}) <button onclick="amt.value=${x.amount};desc.value='${x.payee}'">Use</button></div>`).join('');}
+async function nonce(){if(gw!=='braintree')return 'fake-valid-nonce';return (await dropin.requestPaymentMethod()).nonce;}
+async function pay(){const r=await post('/api/checkout',{amount:amt.value,nonce:await nonce(),description:desc.value});payout.textContent=JSON.stringify(r,null,2);refresh();}
+async function refresh(){const a=await j('/api/approvals');appr.innerHTML=a.map(x=>`<div>$${x.amount} ${x.description} <button onclick="decide('${x.approval_id}','approve')">Approve</button><button onclick="decide('${x.approval_id}','reject')">Reject</button></div>`).join('')||'None pending';
+ const t=await j('/api/transactions');tx.innerHTML=t.map(x=>`<div>${x.id} $${x.amount} ${x.status} ${x.payment_type||''} <button onclick="refund('${x.id}')">Refund</button></div>`).join('')||'None';}
+async function decide(id,dc){payout.textContent=JSON.stringify(await post(`/api/approvals/${id}/${dc}`),null,2);refresh();}
+async function refund(id){payout.textContent=JSON.stringify(await post(`/api/transactions/${id}/refund`),null,2);refresh();}
+init();
+</script></body></html>
