@@ -43,5 +43,26 @@ pytest -q                        # runs without keys
 ```
 Sandbox test values: PayPal button logs in with a sandbox buyer; card `4111 1111 1111 1111`, any future expiry.
 
+## Deploy to Cloudflare
+Approach: **Cloudflare Containers** — a small Worker (`cloudflare/src/index.ts`) routes every request to this FastAPI app running from the `Dockerfile`. Chosen because the Braintree Python SDK uses `requests`/blocking HTTP and native deps that Python Workers (Pyodide) don't reliably support; a container runs the app unchanged.
+
+**Plan requirement:** Containers need the **Workers Paid** plan ($5/month, includes container usage allowance). Free plan cannot run containers.
+
+```bash
+cd cloudflare && npm install
+npx wrangler login                      # or CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
+npx wrangler secret put BRAINTREE_PUBLIC_KEY
+npx wrangler secret put BRAINTREE_PRIVATE_KEY
+# only if LLM_PROVIDER=bedrock:
+npx wrangler secret put AWS_ACCESS_KEY_ID
+npx wrangler secret put AWS_SECRET_ACCESS_KEY
+npx wrangler deploy                     # needs Docker running locally
+```
+Or run the **deploy-cloudflare** GitHub Action manually (repo secrets `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`).
+
+Optional custom domain (`pay.taswar.dev`): `cd infra/terraform`, copy `terraform.tfvars.example` to `terraform.tfvars`, set `zone_id`, then `terraform init && terraform apply`.
+
+Persistence plan (D1): see `docs/PERSISTENCE.md`.
+
 ## License
 MIT

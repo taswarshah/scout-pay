@@ -1,0 +1,19 @@
+name: deploy-cloudflare
+on:
+  workflow_dispatch:   # manual only
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: "3.12"}
+      - run: pip install -r requirements.txt && pytest -q
+      - uses: actions/setup-node@v4
+        with: {node-version: "20"}
+      - working-directory: cloudflare
+        run: npm install && npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

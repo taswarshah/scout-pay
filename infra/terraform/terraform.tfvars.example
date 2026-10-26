@@ -1,0 +1,2 @@
+account_id = "<cloudflare-account-id>"
+zone_id    = ""  # set to taswar.dev zone id to enable pay.taswar.dev

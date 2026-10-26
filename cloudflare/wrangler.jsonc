@@ -1,0 +1,28 @@
+// Cloudflare Containers deployment for Scout Pay (requires Workers Paid plan).
+// Secrets are NOT stored here: set them with `wrangler secret put` (see README).
+{
+  "name": "scout-pay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "observability": { "enabled": true },
+  "containers": [
+    {
+      "class_name": "ScoutPayContainer",
+      "image": "../Dockerfile",
+      "instance_type": "basic",
+      "max_instances": 2
+    }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "SCOUT_PAY", "class_name": "ScoutPayContainer" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ScoutPayContainer"] }],
+  "vars": {
+    "BRAINTREE_ENVIRONMENT": "sandbox",
+    "BRAINTREE_MERCHANT_ID": "vb6xdy5qdvnhxggm",
+    "APPROVAL_THRESHOLD": "500",
+    "LLM_PROVIDER": "mock"
+  }
+  // Persistence (planned): add a D1 binding here once created, e.g.
+  // "d1_databases": [{ "binding": "DB", "database_name": "scout-pay", "database_id": "<id>" }]
+}
