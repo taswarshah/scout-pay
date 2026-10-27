@@ -54,9 +54,12 @@ class BraintreeGateway:
 
     def sale(self, amount, nonce, description=""):
         r = self.gw.transaction.sale({"amount": str(amount), "payment_method_nonce": nonce,
+                                      "order_id": "sp-" + uuid.uuid4().hex[:12],
                                       "options": {"submit_for_settlement": True}})
         if r.is_success:
             return {"success": True, "transaction": self._t(r.transaction)}
+        if r.transaction is not None:  # gateway/processor rejection: surface status + id
+            return {"success": False, "error": r.message, "transaction": self._t(r.transaction)}
         return {"success": False, "error": r.message}
 
     def list(self):
