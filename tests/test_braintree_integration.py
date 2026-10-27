@@ -56,3 +56,54 @@ def test_sandbox_paypal(client):
     assert pp["success"], pp
     assert pp["transaction"]["payment_type"] == "paypal_account"
     print("\nIDS paypal=%s/%s" % (pp["transaction"]["id"], pp["transaction"]["status"]))
+
+
+@pytest.fixture()
+def bt_agent(monkeypatch):
+    for k, v in creds.items():
+        if v:
+            monkeypatch.setenv(k, v)
+    monkeypatch.setenv("BRAINTREE_ENVIRONMENT", "sandbox")
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    from app.agent import Agent
+    from app.gateway import BraintreeGateway
+    from app.store import SQLiteRepo
+    return Agent(SQLiteRepo(":memory:"), BraintreeGateway())
+
+
+def test_sandbox_agent_end_to_end(bt_agent):
+    ag, ids = bt_agent, {}
+    # 1) small cart, card nonce, confirm -> charged
+    ag.chat("it1", "I need movers, a visa fee and internet")
+    r = ag.chat("it1", "pay", nonce="fake-valid-nonce")
+    assert r["proposal"]["status"] == "awaiting_confirmation"
+    r = ag.chat("it1", "confirm")
+    assert r["proposal"]["status"] == "paid", r["reply"]
+    ids["small"] = r["last_txn"]
+    assert ag.chat("it1", "status")["tool_calls"][0]["result"]["transaction"]["status"] in ("submitted_for_settlement", "settling", "settled")
+    # idempotent replay: no second charge
+    assert ag.run_tool("it1", "execute_payment", {"proposal_id": r["proposal"]["id"]})["idempotent_replay"]
+    r = ag.chat("it1", "refund")
+    assert r["tool_calls"][0]["result"]["transaction"]["status"] == "voided"
+    # 2) over threshold with vaulted card -> needs approver
+    ag.set_payment_method("it2", nonce="fake-valid-nonce", vault=True)
+    assert ag.state("it2")["token"]
+    ag.chat("it2", "add rental deposit")
+    pid = ag.chat("it2", "pay")["proposal"]["id"]
+    assert ag.chat("it2", "confirm")["proposal"]["status"] == "awaiting_approval"
+    ag.decide(pid, "approve")
+    r = ag.chat("it2", "pay")
+    assert r["proposal"]["status"] == "paid", r["reply"]
+    ids["big_vaulted"] = r["last_txn"]
+    ids["big_void"] = ag.chat("it2", "refund")["tool_calls"][0]["result"]["transaction"]["status"]
+    # 3) PayPal nonce: either works or degrades to a card hint
+    ag.chat("it3", "add sim card"); ag.chat("it3", "pay")
+    r = ag.chat("it3", "confirm", nonce="fake-paypal-one-time-nonce")
+    if r["proposal"]["status"] != "paid":
+        assert "card" in r["reply"]
+        r = ag.chat("it3", "pay", nonce="fake-valid-nonce")
+        assert r["proposal"]["status"] == "paid"
+        ids["paypal"] = "rejected->card"
+    ids["sim"] = r["last_txn"]
+    ag.chat("it3", "refund")
+    print("\nAGENT IDS", ids)
