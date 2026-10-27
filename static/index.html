@@ -1,27 +1,57 @@
 <!doctype html><html><head><meta charset="utf-8"><title>Scout Pay</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <script src="https://js.braintreegateway.com/web/dropin/1.43.0/js/dropin.min.js"></script>
-<style>body{font-family:system-ui;max-width:860px;margin:2rem auto;padding:0 1rem}section{border:1px solid #ddd;border-radius:8px;padding:1rem;margin:1rem 0}button{margin:.2rem}</style></head>
-<body><h1>Scout Pay</h1><p>AI relocation agent that plans your move and pays for it via PayPal / Braintree (sandbox).</p>
-<section><h2>1. Plan</h2><input id=o placeholder="From" value="Lahore"> <input id=d placeholder="To" value="Berlin">
-<input id=b type=number value=3000> <button onclick=plan()>Plan move</button><div id=plan></div></section>
-<section><h2>2. Pay</h2><div id=dropin></div><input id=amt type=number step=0.01 placeholder="Amount"> <input id=desc placeholder="Description">
-<button onclick=pay()>Pay</button><pre id=payout></pre></section>
-<section><h2>3. Approvals (human-in-the-loop)</h2><div id=appr></div></section>
-<section><h2>4. Transactions</h2><div id=tx></div></section>
+<style>
+body{font-family:system-ui;max-width:1100px;margin:1.5rem auto;padding:0 1rem;color:#1b1b1b}
+.grid{display:grid;grid-template-columns:3fr 2fr;gap:1rem}@media(max-width:800px){.grid{grid-template-columns:1fr}}
+section{border:1px solid #ddd;border-radius:10px;padding:1rem;margin-bottom:1rem}
+#log{height:380px;overflow:auto;background:#fafafa;border-radius:8px;padding:.5rem}
+.m{margin:.4rem 0;padding:.5rem .7rem;border-radius:8px;white-space:pre-wrap;max-width:90%}
+.u{background:#0070ba;color:#fff;margin-left:auto}.a{background:#eef2f5}.tool{font:12px monospace;color:#666;margin:.1rem 0 .1rem .5rem}
+#f{display:flex;gap:.4rem;margin-top:.5rem}#msg{flex:1;padding:.5rem}button{padding:.4rem .7rem;margin:.15rem;cursor:pointer}
+.small{font-size:12px;color:#666}.pill{display:inline-block;padding:.1rem .5rem;border-radius:99px;background:#ffe9a8;font-size:12px}
+</style></head><body>
+<h1>Scout Pay <span class="small" id=cfg></span></h1>
+<p>An AI agent that finds relocation services, builds your quote and pays for it with PayPal / Braintree. Nothing is charged until you confirm, and anything over the approval limit needs an approver.</p>
+<div class=grid><div>
+<section><h3>Chat with Scout</h3><div id=log></div>
+<div id=prop></div>
+<form id=f onsubmit="send(event)"><input id=msg autocomplete=off placeholder="e.g. I need movers, a visa fee and internet"><button>Send</button></form>
+<div class=small>Try: "I need movers, a visa fee and internet" → "pay" → "confirm" → "status" → "refund"</div></section>
+</div><div>
+<section><h3>Payment method</h3><div id=dropin></div>
+<label class=small><input type=checkbox id=vault> Save card for later (vault)</label><br>
+<button onclick="useMethod()">Use this payment method</button> <span id=pm class=small></span></section>
+<section><h3>Approvals (approver view)</h3><div id=appr></div></section>
+<section><h3>Audit log</h3><div id=audit class=small style="max-height:220px;overflow:auto"></div></section>
+</div></div>
 <script>
-let dropin=null,gw='mock';
+let dropin=null,gw='mock',sid=localStorage.sid||null,pending=null;
+const $=id=>document.getElementById(id);
 const j=(u,o)=>fetch(u,o).then(r=>r.json());
 const post=(u,b)=>j(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
-async function init(){const t=await j('/api/client-token');gw=t.gateway;
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function add(cls,t){const d=document.createElement('div');d.className='m '+cls;d.textContent=t;$('log').appendChild(d);$('log').scrollTop=1e9}
+function tool(t){const d=document.createElement('div');d.className='tool';d.textContent='⚙ '+t.name+'('+JSON.stringify(t.args)+')'+(t.result&&t.result.error?' → '+t.result.error:'');$('log').appendChild(d)}
+async function init(){
+ const c=await j('/api/config');$('cfg').textContent=`gateway: ${c.gateway} · LLM: ${c.llm} · approval over $${c.approval_threshold} · daily limit $${c.daily_limit}`;
+ const t=await j('/api/client-token');gw=t.gateway;
  if(gw==='braintree'){dropin=await braintree.dropin.create({authorization:t.token,container:'#dropin',paypal:{flow:'vault'}});}
- else document.getElementById('dropin').innerText='Mock gateway (no Braintree keys set): payments are simulated.';refresh();}
-async function plan(){const p=await post('/api/plan',{origin:o.value,destination:d.value,budget:+b.value});
- document.getElementById('plan').innerHTML=`<p>${p.summary} <i>(${p.provider})</i></p>`+p.payments.map(x=>`<div>${x.payee}: $${x.amount} (${x.purpose}) <button onclick="amt.value=${x.amount};desc.value='${x.payee}'">Use</button></div>`).join('');}
-async function nonce(){if(gw!=='braintree')return 'fake-valid-nonce';return (await dropin.requestPaymentMethod()).nonce;}
-async function pay(){const r=await post('/api/checkout',{amount:amt.value,nonce:await nonce(),description:desc.value});payout.textContent=JSON.stringify(r,null,2);refresh();}
-async function refresh(){const a=await j('/api/approvals');appr.innerHTML=a.map(x=>`<div>$${x.amount} ${x.description} <button onclick="decide('${x.approval_id}','approve')">Approve</button><button onclick="decide('${x.approval_id}','reject')">Reject</button></div>`).join('')||'None pending';
- const t=await j('/api/transactions');tx.innerHTML=t.map(x=>`<div>${x.id} $${x.amount} ${x.status} ${x.payment_type||''} <button onclick="refund('${x.id}')">Refund</button></div>`).join('')||'None';}
-async function decide(id,dc){payout.textContent=JSON.stringify(await post(`/api/approvals/${id}/${dc}`),null,2);refresh();}
-async function refund(id){payout.textContent=JSON.stringify(await post(`/api/transactions/${id}/refund`),null,2);refresh();}
+ else $('dropin').textContent='Mock gateway (no Braintree keys): payments are simulated.';
+ add('a',"Hi, I'm Scout. Tell me what you need for your move (movers, rental deposit, visa fee, internet...).");refresh();}
+async function useMethod(){if(gw!=='braintree'){pending='fake-valid-nonce';$('pm').textContent='mock card ready';return}
+ try{const p=await dropin.requestPaymentMethod();pending=p.nonce;$('pm').textContent=(p.type==='PayPalAccount'?'PayPal':'Card '+(p.details.lastFour||''))+' ready';}catch(e){$('pm').textContent=e.message}}
+async function send(e,text){e&&e.preventDefault();const m=text||$('msg').value.trim();if(!m)return;$('msg').value='';add('u',m);
+ const r=await post('/api/chat',{message:m,session_id:sid,nonce:pending,vault:$('vault').checked});pending=null;
+ sid=r.session_id;localStorage.sid=sid;(r.tool_calls||[]).forEach(tool);add('a',r.reply);showProp(r.proposal);refresh();}
+function showProp(p){if(!p||!['awaiting_confirmation','awaiting_approval','ready'].includes(p.status)){$('prop').innerHTML='';return}
+ $('prop').innerHTML=`<p><span class=pill>${p.status.replace('_',' ')}</span> Proposal ${p.id}: <b>$${p.amount}</b> ${esc(p.description)} `+
+ (p.status==='awaiting_confirmation'?`<button onclick="send(null,'confirm')">Confirm</button><button onclick="send(null,'cancel')">Cancel</button>`:'')+
+ (p.status==='ready'?`<button onclick="send(null,'pay')">Pay now</button>`:'')+'</p>';}
+async function refresh(){const a=await j('/api/approvals');
+ $('appr').innerHTML=a.map(x=>`<div>$${x.amount} ${esc(x.description)} <button onclick="decide('${x.approval_id}','approve')">Approve</button><button onclick="decide('${x.approval_id}','reject')">Reject</button></div>`).join('')||'None pending';
+ const l=await j('/api/audit?limit=40'+(sid?'&session_id='+sid:''));$('audit').innerHTML=l.map(x=>`<div>${x.at.slice(11,19)} <b>${x.actor}</b> ${x.event} ${x.ref||''} ${x.amount?'$'+x.amount:''}</div>`).join('');}
+async function decide(id,d){await post(`/api/approvals/${id}/${d}`);add('a',d==='approve'?'An approver approved the payment. Say "pay" to charge it.':'The approver rejected the payment.');
+ if(sid){const p=(await j('/api/proposals')).find(x=>x.id===id);showProp(p)}refresh();}
 init();
 </script></body></html>
