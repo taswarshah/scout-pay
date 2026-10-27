@@ -102,3 +102,11 @@ class SQLiteRepo(Repo):
     def _query(self, sql, params=()):
         with self.lock:
             return [dict(r) for r in self.db.execute(sql, params).fetchall()]
+
+
+def _payment_by_txn(self, txn_id):
+    r = self._query("SELECT * FROM payments WHERE txn_id=?", (txn_id,))
+    return dict(r[0]) if r else None
+
+
+Repo.payment_by_txn = _payment_by_txn

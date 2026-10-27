@@ -1,17 +1,26 @@
 import os, uuid
 from decimal import Decimal
-from fastapi import FastAPI, HTTPException
+from typing import Optional
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from . import catalog
+from .agent import Agent, limits
 from .gateway import get_gateway
 from .llm import plan_move
+from .planner import bedrock_available
+from .store import SQLiteRepo
 
 app = FastAPI(title="Scout Pay")
 gateway = get_gateway()
-pending = {}  # approval_id -> payment request awaiting a human
-THRESHOLD = lambda: Decimal(os.getenv("APPROVAL_THRESHOLD", "500"))
+repo = SQLiteRepo()
+agent = Agent(repo, gateway)
 STATIC = os.path.join(os.path.dirname(__file__), "..", "static")
+
+
+def THRESHOLD():
+    return limits()["approval_threshold"]
 
 
 class PlanReq(BaseModel):
@@ -27,6 +36,24 @@ class PayReq(BaseModel):
     description: str = ""
 
 
+class ChatReq(BaseModel):
+    message: str
+    session_id: Optional[str] = None
+    nonce: Optional[str] = None
+    payment_method_token: Optional[str] = None
+    vault: bool = False
+
+
+class SessionReq(BaseModel):
+    session_id: str
+
+
+def _agent():
+    # tests swap `gateway` at module level; keep the agent pointed at it
+    agent.gw = gateway
+    return agent
+
+
 @app.get("/")
 def index():
     return FileResponse(os.path.join(STATIC, "index.html"))
@@ -34,7 +61,9 @@ def index():
 
 @app.get("/api/config")
 def config():
-    return {"gateway": gateway.name, "approval_threshold": str(THRESHOLD())}
+    L = limits()
+    return {"gateway": gateway.name, "approval_threshold": str(THRESHOLD()), "max_single_payment": str(L["max_single"]),
+            "daily_limit": str(L["daily"]), "llm": "bedrock" if bedrock_available() else "mock"}
 
 
 @app.get("/api/client-token")
@@ -42,35 +71,96 @@ def client_token():
     return {"token": gateway.client_token(), "gateway": gateway.name}
 
 
+@app.get("/api/catalog")
+def get_catalog(q: str = ""):
+    return catalog.search(q)
+
+
 @app.post("/api/plan")
 def plan(r: PlanReq):
     return plan_move(r.origin, r.destination, r.people, r.budget)
 
 
+# ---------- agent ----------
+@app.post("/api/chat")
+def chat(r: ChatReq):
+    sid = r.session_id or "s_" + uuid.uuid4().hex[:12]
+    return _agent().chat(sid, r.message, nonce=r.nonce, token=r.payment_method_token, vault=r.vault)
+
+
+@app.post("/api/proposals/{pid}/confirm")
+def confirm(pid: str, r: SessionReq):
+    res = _agent().confirm(r.session_id, pid, actor="user:ui")
+    if not res["ok"]:
+        raise HTTPException(409, res["error"])
+    return res
+
+
+@app.post("/api/proposals/{pid}/cancel")
+def cancel(pid: str, r: SessionReq):
+    res = _agent().cancel(r.session_id, pid, actor="user:ui")
+    if not res["ok"]:
+        raise HTTPException(409, res["error"])
+    return res
+
+
+@app.get("/api/proposals")
+def proposals(status: Optional[str] = None):
+    return repo.list_proposals(status)
+
+
+@app.get("/api/audit")
+def audit(session_id: Optional[str] = None, limit: int = 100):
+    return repo.audit_log(limit, session_id)
+
+
+# ---------- direct checkout (non-agent) ----------
 @app.post("/api/checkout")
-def checkout(r: PayReq):
+def checkout(r: PayReq, idempotency_key: Optional[str] = Header(None)):
+    a = _agent()
     if r.amount <= 0:
         raise HTTPException(400, "amount must be positive")
+    if idempotency_key:
+        prior = repo.get_payment("direct:" + idempotency_key)
+        if prior and prior["success"]:
+            return {**prior["result"], "idempotent_replay": True}
+    sid = "direct-" + uuid.uuid4().hex[:8]
+    err = a._limit_error(None, r.amount)
+    if err:
+        repo.audit("policy", "checkout_blocked", sid, amount=r.amount, detail={"reason": err})
+        raise HTTPException(422, err)
     if r.amount > THRESHOLD():
-        aid = uuid.uuid4().hex[:8]
-        pending[aid] = r.model_dump(mode="json")
-        return {"status": "pending_approval", "approval_id": aid}
-    return gateway.sale(r.amount, r.nonce, r.description)
+        pid = "p_" + uuid.uuid4().hex[:10]
+        repo.add_proposal({"id": pid, "session_id": sid, "amount": r.amount, "description": r.description,
+                           "items": [], "status": "awaiting_approval", "needs_approval": True})
+        a.nonces[sid] = r.nonce
+        repo.audit("user", "checkout_needs_approval", sid, pid, r.amount)
+        return {"status": "pending_approval", "approval_id": pid}
+    res = gateway.sale(r.amount, r.nonce, r.description)
+    repo.record_payment("direct:" + (idempotency_key or uuid.uuid4().hex), None, sid, r.amount, res)
+    repo.audit("gateway", "payment_" + ("succeeded" if res["success"] else "failed"), sid,
+               (res.get("transaction") or {}).get("id"), r.amount, {"error": res.get("error")})
+    return res
 
 
 @app.get("/api/approvals")
 def approvals():
-    return [{"approval_id": k, **v} for k, v in pending.items()]
+    return [{"approval_id": p["id"], "amount": p["amount"], "description": p["description"], "session_id": p["session_id"]}
+            for p in repo.list_proposals("awaiting_approval")]
 
 
 @app.post("/api/approvals/{aid}/{decision}")
 def decide(aid: str, decision: str):
-    if aid not in pending or decision not in ("approve", "reject"):
+    a = _agent()
+    res = a.decide(aid, decision, approver="approver:ui")
+    if not res["ok"]:
         raise HTTPException(404, "unknown approval")
-    req = pending.pop(aid)
     if decision == "reject":
         return {"status": "rejected"}
-    return gateway.sale(Decimal(req["amount"]), req["nonce"], req["description"])
+    p = repo.get_proposal(aid)
+    if p["session_id"].startswith("direct-"):  # direct checkout: charge now with the held nonce
+        return a.t_execute_payment(p["session_id"], aid)
+    return {"status": "ready", "proposal_id": aid, "next": "tell the agent 'pay'"}
 
 
 @app.get("/api/transactions")
@@ -81,6 +171,7 @@ def transactions():
 @app.post("/api/transactions/{tid}/refund")
 def refund(tid: str):
     r = gateway.refund(tid)
+    repo.audit("user:ui", "refund_" + ("succeeded" if r["success"] else "failed"), None, tid, detail={"error": r.get("error")})
     if not r["success"]:
         raise HTTPException(400, r.get("error"))
     return r
