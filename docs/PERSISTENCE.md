@@ -1,7 +1,15 @@
-# Persistence plan
-Today pending approvals live in container memory (lost when the container sleeps after 15 min idle); transactions are always read back from Braintree, so nothing payment-critical is lost.
+# Persistence
 
-Plan: Cloudflare **D1** (SQLite) bound to the Worker.
-- `approvals(id, amount, description, nonce_ref, status, created_at, decided_at)`
-- `audit(id, event, txn_id, amount, at)`
-The Worker exposes `/internal/db/*` to the container (or the container calls a Worker route) so Python stays unchanged except a storage adapter in `app/store.py`. Nonces are single-use and short-lived, so for approvals older than ~3h we'd re-collect payment instead of storing nonces.
+All state goes through `app/store.py`'s `Repo` interface:
+sessions (chat + cart state), proposals (payments awaiting confirmation/approval),
+payments (idempotency ledger + spend limits) and an append-only audit log.
+
+- **Local / tests:** `SQLiteRepo` (`SCOUT_DB`, default `data/scout.db`; tests use `:memory:`).
+- **Cloudflare:** the schema in `migrations/0001_init.sql` is D1-compatible SQLite.
+  `wrangler d1 create scout-pay && wrangler d1 migrations apply scout-pay` creates it.
+  A `D1Repo` only needs `_exec`/`_query`, calling a Worker route (`/internal/db`) that runs
+  `env.DB.prepare(sql).bind(...params)`. Nothing else in the app changes.
+
+Transactions themselves are always re-read from Braintree, so the DB is never the source of truth for money;
+it's the source of truth for *who approved what* and for idempotency. Payment nonces are single-use (~3h) and are
+never stored in the DB; approvals older than that re-collect a payment method (or use a vaulted token).

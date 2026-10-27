@@ -8,3 +8,4 @@ __pycache__/
 terraform.tfvars
 cloudflare/node_modules/
 cloudflare/.wrangler/
+data/
