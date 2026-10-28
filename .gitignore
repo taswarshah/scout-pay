@@ -9,3 +9,4 @@ terraform.tfvars
 cloudflare/node_modules/
 cloudflare/.wrangler/
 data/
+.approver_key
