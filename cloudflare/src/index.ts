@@ -13,10 +13,11 @@ interface Env {
   AWS_REGION?: string;
   AWS_ACCESS_KEY_ID?: string;      // secret (only if LLM_PROVIDER=bedrock)
   AWS_SECRET_ACCESS_KEY?: string;  // secret
+  APPROVER_KEY?: string;           // secret: locks approvals, refunds, full audit log
 }
 
 const PASS = ["BRAINTREE_ENVIRONMENT", "BRAINTREE_MERCHANT_ID", "BRAINTREE_PUBLIC_KEY", "BRAINTREE_PRIVATE_KEY",
-  "APPROVAL_THRESHOLD", "LLM_PROVIDER", "BEDROCK_MODEL_ID", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] as const;
+  "APPROVAL_THRESHOLD", "LLM_PROVIDER", "BEDROCK_MODEL_ID", "AWS_REGION", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "APPROVER_KEY"] as const;
 
 const PORT = 8080;
 const IDLE_MS = 15 * 60 * 1000;
@@ -50,7 +51,7 @@ export class ScoutPayContainer extends DurableObject<Env> {
   private async waitReady() {
     const port = this.ctx.container!.getTcpPort(PORT);
     for (let i = 0; i < 120; i++) {
-      try { await port.fetch("http://container/api/config"); return; }
+      try { await port.fetch("http://container/healthz"); return; }
       catch { await new Promise((r) => setTimeout(r, 500)); }
     }
     throw new Error("container did not become ready");

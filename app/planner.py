@@ -165,7 +165,9 @@ def mock_plan(agent, sid, message, human):
         if not added:
             return done("I couldn't find a matching service. Try movers, rental deposit, visa fee, internet or airport pickup.")
         cart = agent.cart_view(agent.state(sid))
-        return done("Added " + "; ".join(added) + ".\n" + _fmt_cart(cart) + "\nSay 'pay' when you're ready and I'll prepare the payment.")
+        n = len(added)
+        return done(f"Added {n} item{'s' if n > 1 else ''} to your quote.\n" + _fmt_cart(cart)
+                    + "\nSay 'pay' when you're ready and I'll prepare the payment.")
     if re.search(r"\b(search|find|show|options|list|what|which|catalog)\b", m) or len(m.split()) <= 4:
         q = re.sub(r"\b(search|find|show|me|options|for|list|what|which|are|is|there|catalog|services?)\b", " ", m).strip()
         res = call("search_services", query=q)["results"]

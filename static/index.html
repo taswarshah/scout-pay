@@ -1,5 +1,6 @@
 <!doctype html><html><head><meta charset="utf-8"><title>Scout Pay</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230070ba'/%3E%3Ctext x='16' y='22' font-family='system-ui' font-size='16' font-weight='700' fill='white' text-anchor='middle'%3ESP%3C/text%3E%3C/svg%3E">
 <script src="https://js.braintreegateway.com/web/dropin/1.43.0/js/dropin.min.js"></script>
 <style>
 body{font-family:system-ui;max-width:1100px;margin:1.5rem auto;padding:0 1rem;color:#1b1b1b}
@@ -22,19 +23,23 @@ section{border:1px solid #ddd;border-radius:10px;padding:1rem;margin-bottom:1rem
 <section><h3>Payment method</h3><div id=dropin></div>
 <label class=small><input type=checkbox id=vault> Save card for later (vault)</label><br>
 <button onclick="useMethod()">Use this payment method</button> <span id=pm class=small></span></section>
-<section><h3>Approvals (approver view)</h3><div id=appr></div></section>
+<section><h3>Approvals (approver view)</h3>
+<div id=akey style="display:none"><input id=ak type=password placeholder="Approver key" autocomplete=off> <button onclick="setKey()">Unlock</button></div>
+<div id=appr></div></section>
 <section><h3>Audit log</h3><div id=audit class=small style="max-height:220px;overflow:auto"></div></section>
 </div></div>
 <script>
-let dropin=null,gw='mock',sid=localStorage.sid||null,pending=null;
+let dropin=null,gw='mock',sid=localStorage.sid||null,pending=null,needKey=false;
+let akey='';try{akey=sessionStorage.akey||''}catch(e){}
 const $=id=>document.getElementById(id);
 const j=(u,o)=>fetch(u,o).then(r=>r.json());
-const post=(u,b)=>j(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+const ah=()=>akey?{'X-Approver-Key':akey}:{};
+const post=(u,b,h)=>j(u,{method:'POST',headers:{'Content-Type':'application/json',...(h||{})},body:JSON.stringify(b||{})});
 const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 function add(cls,t){const d=document.createElement('div');d.className='m '+cls;d.textContent=t;$('log').appendChild(d);$('log').scrollTop=1e9}
 function tool(t){const d=document.createElement('div');d.className='tool';d.textContent='⚙ '+t.name+'('+JSON.stringify(t.args)+')'+(t.result&&t.result.error?' → '+t.result.error:'');$('log').appendChild(d)}
 async function init(){
- const c=await j('/api/config');$('cfg').textContent=`gateway: ${c.gateway} · LLM: ${c.llm} · approval over $${c.approval_threshold} · daily limit $${c.daily_limit}`;
+ const c=await j('/api/config');needKey=c.approver_key_required;$('cfg').textContent=`gateway: ${c.gateway} · LLM: ${c.llm} · approval over $${c.approval_threshold} · daily limit $${c.daily_limit}`;
  const t=await j('/api/client-token');gw=t.gateway;
  if(gw==='braintree'){dropin=await braintree.dropin.create({authorization:t.token,container:'#dropin',paypal:{flow:'vault'}});}
  else $('dropin').textContent='Mock gateway (no Braintree keys): payments are simulated.';
@@ -48,10 +53,14 @@ function showProp(p){if(!p||!['awaiting_confirmation','awaiting_approval','ready
  $('prop').innerHTML=`<p><span class=pill>${p.status.replace('_',' ')}</span> Proposal ${p.id}: <b>$${p.amount}</b> ${esc(p.description)} `+
  (p.status==='awaiting_confirmation'?`<button onclick="send(null,'confirm')">Confirm</button><button onclick="send(null,'cancel')">Cancel</button>`:'')+
  (p.status==='ready'?`<button onclick="send(null,'pay')">Pay now</button>`:'')+'</p>';}
-async function refresh(){const a=await j('/api/approvals');
- $('appr').innerHTML=a.map(x=>`<div>$${x.amount} ${esc(x.description)} <button onclick="decide('${x.approval_id}','approve')">Approve</button><button onclick="decide('${x.approval_id}','reject')">Reject</button></div>`).join('')||'None pending';
- const l=await j('/api/audit?limit=40'+(sid?'&session_id='+sid:''));$('audit').innerHTML=l.map(x=>`<div>${x.at.slice(11,19)} <b>${x.actor}</b> ${x.event} ${x.ref||''} ${x.amount?'$'+x.amount:''}</div>`).join('');}
-async function decide(id,d){await post(`/api/approvals/${id}/${d}`);add('a',d==='approve'?'An approver approved the payment. Say "pay" to charge it.':'The approver rejected the payment.');
- if(sid){const p=(await j('/api/proposals')).find(x=>x.id===id);showProp(p)}refresh();}
+function setKey(){akey=$('ak').value;try{sessionStorage.akey=akey}catch(e){}refresh()}
+async function refresh(){
+ const r=await fetch('/api/approvals',{headers:ah()});const locked=r.status===401;
+ $('akey').style.display=needKey&&locked?'':'none';
+ const a=locked?[]:await r.json();
+ $('appr').innerHTML=locked?(akey?'Wrong approver key.':'Approvers: enter the approver key to see pending payments.'):a.map(x=>`<div>$${x.amount} ${esc(x.description)} <button onclick="decide('${x.approval_id}','approve')">Approve</button><button onclick="decide('${x.approval_id}','reject')">Reject</button></div>`).join('')||'None pending';
+ const l=await j('/api/audit?limit=40'+(sid?'&session_id='+sid:''),{headers:ah()});$('audit').innerHTML=(Array.isArray(l)?l:[]).map(x=>`<div>${x.at.slice(11,19)} <b>${x.actor}</b> ${x.event} ${x.ref||''} ${x.amount?'$'+x.amount:''}</div>`).join('');}
+async function decide(id,d){await post(`/api/approvals/${id}/${d}`,{},ah());add('a',d==='approve'?'An approver approved the payment. Say "pay" to charge it.':'The approver rejected the payment.');
+ if(sid){const p=(await j('/api/proposals?session_id='+sid)).find(x=>x.id===id);if(p)showProp(p)}refresh();}
 init();
 </script></body></html>

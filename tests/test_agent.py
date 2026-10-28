@@ -120,3 +120,33 @@ def test_checkout_idempotency_header():
     a = c.post("/api/checkout", json={"amount": "20", "nonce": "fake-valid-nonce"}, headers=h).json()
     b = c.post("/api/checkout", json={"amount": "20", "nonce": "fake-valid-nonce"}, headers=h).json()
     assert b["idempotent_replay"] and a["transaction"]["id"] == b["transaction"]["id"]
+
+
+def test_cart_cleared_after_payment(ag):
+    ag.chat("s20", "I need movers"); ag.chat("s20", "pay"); ag.chat("s20", "confirm")
+    assert ag.cart_view(ag.state("s20"))["items"] == []
+    r = ag.chat("s20", "add rental deposit")
+    assert r["cart"]["total"] == "900.00"
+
+
+def test_add_reply_lists_items_once(ag):
+    r = ag.chat("s21", "I need movers, a visa fee and internet")
+    assert r["reply"].count("Work visa application fee") == 1
+
+
+def test_approver_key_locks_admin_endpoints(monkeypatch):
+    import app.main as m
+    m.gateway = MockGateway()
+    c = TestClient(m.app)
+    monkeypatch.setenv("APPROVER_KEY", "s3cret")
+    sid = c.post("/api/chat", json={"message": "add rental deposit"}).json()["session_id"]
+    pid = c.post("/api/chat", json={"session_id": sid, "message": "pay"}).json()["proposal"]["id"]
+    c.post("/api/chat", json={"session_id": sid, "message": "confirm"})
+    for method, url in (("get", "/api/approvals"), ("post", f"/api/approvals/{pid}/approve"), ("get", "/api/transactions"),
+                        ("get", "/api/audit"), ("get", "/api/proposals"), ("post", "/api/transactions/x/refund")):
+        assert getattr(c, method)(url, headers={"X-Approver-Key": "wrong"}).status_code == 401, url
+    assert c.get(f"/api/audit?session_id={sid}").status_code == 200        # own session stays readable
+    assert c.get(f"/api/proposals?session_id={sid}").json()[0]["id"] == pid
+    ok = {"X-Approver-Key": "s3cret"}
+    assert c.post(f"/api/approvals/{pid}/approve", headers=ok).json()["status"] == "ready"
+    assert c.get("/api/config").json()["approver_key_required"] and c.get("/healthz").json()["ok"]

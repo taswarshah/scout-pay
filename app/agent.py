@@ -227,7 +227,8 @@ class Agent:
         t = res.get("transaction") or {}
         if res.get("success"):
             self.repo.update_proposal(p["id"], "paid", t.get("id"))
-            st["last_txn"] = t.get("id"); self.repo.save_session(sid, st)
+            st["last_txn"], st["cart"] = t.get("id"), []  # paid items leave the cart
+            self.repo.save_session(sid, st)
             self.repo.audit("gateway", "payment_succeeded", sid, t.get("id"), amount, {"proposal": p["id"]})
             return res
         self.repo.audit("gateway", "payment_failed", sid, t.get("id"), amount, {"error": res.get("error")})

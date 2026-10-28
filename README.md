@@ -13,6 +13,7 @@ Built for the [PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). Sco
 - **Guardrails enforced in code, not by the LLM**
   - Proposing never charges. A proposal becomes payable only after **you confirm** (your own "confirm" message or the Confirm button); the LLM has no confirm tool.
   - Over `APPROVAL_THRESHOLD` (default $500) an **approver** must also approve (`/api/approvals`).
+  - **Approver key**: when `APPROVER_KEY` is set, approving/rejecting, the full audit log, the transaction list and direct refunds need the `X-Approver-Key` header (the UI asks for it in the approver panel). A user can still see their own session's proposals and audit trail. Unset = open, for local dev.
   - **Spending limits**: `MAX_SINGLE_PAYMENT` (default $2000) and rolling 24h `DAILY_LIMIT` (default $3000), checked at propose and at charge.
   - **Idempotency**: each charge uses key `proposal:<id>` (and `Idempotency-Key` header on `/api/checkout`), so retries never double-charge.
   - **Audit log** of every message, tool call, human decision and gateway result (`/api/audit`). Refunds only for transactions this session made.
@@ -40,7 +41,7 @@ Payment lifecycle: `propose → awaiting_confirmation → (user confirms) → [a
 3. In *Payment method* pick a card (sandbox `4111 1111 1111 1111`, any future expiry) → *Use this payment method*.
 4. Chat **"pay"** → proposal created, nothing charged. Click **Confirm** → charged; the reply shows the Braintree transaction ID.
 5. **"status"** → live status from Braintree. **"refund"** → voided (unsettled) / refunded (settled).
-6. **"add rental deposit"** → **"pay"** → **"confirm"** → $900 is over the limit, so it waits in *Approvals*. Click **Approve**, then **"pay"** → charged.
+6. **"add rental deposit"** → **"pay"** → **"confirm"** → $900 is over the limit, so it waits in *Approvals*. Enter the approver key, click **Approve**, then **"pay"** → charged.
 7. Pick PayPal in Drop-in: if PayPal isn't enabled on the merchant, the agent says so and asks for a card instead.
 8. Show the *Audit log* panel: every tool call, confirmation, approval and charge.
 
@@ -86,11 +87,12 @@ cd cloudflare && npm install
 npx wrangler login                      # or export CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID
 npx wrangler secret put BRAINTREE_PUBLIC_KEY
 npx wrangler secret put BRAINTREE_PRIVATE_KEY
+npx wrangler secret put APPROVER_KEY           # locks approvals/refunds/full audit log
 # only if LLM_PROVIDER=bedrock:
 npx wrangler secret put AWS_ACCESS_KEY_ID
 npx wrangler secret put AWS_SECRET_ACCESS_KEY
 npx wrangler deploy                     # needs Docker running locally
-curl https://scout-pay.<your-subdomain>.workers.dev/api/config   # first call starts the container
+curl https://scout-pay.<your-subdomain>.workers.dev/healthz      # first call starts the container
 ```
 Without the Braintree secrets the deployed app uses the mock gateway; set `LLM_PROVIDER` to `bedrock` in `wrangler.jsonc` `vars` (plus the AWS secrets) for the real LLM.
 

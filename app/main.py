@@ -1,7 +1,7 @@
-import os, uuid
+import hmac, os, uuid
 from decimal import Decimal
 from typing import Optional
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -48,6 +48,13 @@ class SessionReq(BaseModel):
     session_id: str
 
 
+def require_approver(x_approver_key: Optional[str] = Header(None)):
+    """Approver/admin endpoints need X-Approver-Key when APPROVER_KEY is set (open otherwise, for local dev)."""
+    key = os.getenv("APPROVER_KEY")
+    if key and not hmac.compare_digest(x_approver_key or "", key):
+        raise HTTPException(401, "approver key required")
+
+
 def _agent():
     # tests swap `gateway` at module level; keep the agent pointed at it
     agent.gw = gateway
@@ -59,11 +66,17 @@ def index():
     return FileResponse(os.path.join(STATIC, "index.html"))
 
 
+@app.get("/healthz")
+def healthz():
+    return {"ok": True}
+
+
 @app.get("/api/config")
 def config():
     L = limits()
     return {"gateway": gateway.name, "approval_threshold": str(THRESHOLD()), "max_single_payment": str(L["max_single"]),
-            "daily_limit": str(L["daily"]), "llm": "bedrock" if bedrock_available() else "mock"}
+            "daily_limit": str(L["daily"]), "llm": "bedrock" if bedrock_available() else "mock",
+            "approver_key_required": bool(os.getenv("APPROVER_KEY"))}
 
 
 @app.get("/api/client-token")
@@ -105,12 +118,17 @@ def cancel(pid: str, r: SessionReq):
 
 
 @app.get("/api/proposals")
-def proposals(status: Optional[str] = None):
-    return repo.list_proposals(status)
+def proposals(status: Optional[str] = None, session_id: Optional[str] = None, x_approver_key: Optional[str] = Header(None)):
+    # Your own session's proposals are always visible; everyone's needs the approver key.
+    if not session_id:
+        require_approver(x_approver_key)
+    return [p for p in repo.list_proposals(status) if not session_id or p["session_id"] == session_id]
 
 
 @app.get("/api/audit")
-def audit(session_id: Optional[str] = None, limit: int = 100):
+def audit(session_id: Optional[str] = None, limit: int = 100, x_approver_key: Optional[str] = Header(None)):
+    if not session_id:
+        require_approver(x_approver_key)
     return repo.audit_log(limit, session_id)
 
 
@@ -143,13 +161,13 @@ def checkout(r: PayReq, idempotency_key: Optional[str] = Header(None)):
     return res
 
 
-@app.get("/api/approvals")
+@app.get("/api/approvals", dependencies=[Depends(require_approver)])
 def approvals():
     return [{"approval_id": p["id"], "amount": p["amount"], "description": p["description"], "session_id": p["session_id"]}
             for p in repo.list_proposals("awaiting_approval")]
 
 
-@app.post("/api/approvals/{aid}/{decision}")
+@app.post("/api/approvals/{aid}/{decision}", dependencies=[Depends(require_approver)])
 def decide(aid: str, decision: str):
     a = _agent()
     res = a.decide(aid, decision, approver="approver:ui")
@@ -163,12 +181,12 @@ def decide(aid: str, decision: str):
     return {"status": "ready", "proposal_id": aid, "next": "tell the agent 'pay'"}
 
 
-@app.get("/api/transactions")
+@app.get("/api/transactions", dependencies=[Depends(require_approver)])
 def transactions():
     return gateway.list()
 
 
-@app.post("/api/transactions/{tid}/refund")
+@app.post("/api/transactions/{tid}/refund", dependencies=[Depends(require_approver)])
 def refund(tid: str):
     r = gateway.refund(tid)
     repo.audit("user:ui", "refund_" + ("succeeded" if r["success"] else "failed"), None, tid, detail={"error": r.get("error")})
