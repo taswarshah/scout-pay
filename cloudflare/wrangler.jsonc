@@ -5,12 +5,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
+  "version_metadata": { "binding": "CF_VERSION" },
   "containers": [
     {
       "class_name": "ScoutPayContainer",
-      "image": "../Dockerfile",
-      "instance_type": "basic",
-      "max_instances": 2
+      "scheduling_policy": "durable_object",
+      "images": { "base": { "dockerfile": "../Dockerfile" } }
     }
   ],
   "durable_objects": {
